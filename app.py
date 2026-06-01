@@ -29,12 +29,13 @@ WEBSUB_HUB = "https://pubsubhubbub.appspot.com/"
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:5000").rstrip("/")
 
 # A bucket is a combination of methods, canonical form: methods sorted and
-# joined by '+', or 'control' for none. The app applies hub + websub.
-# 'apiredirect' = seed.py pings the Indexing API at THIS app's /r/<id>
-# redirector (which we own), 301-ing to the target — the production-faithful
-# way to use the API without owning the target. seed.py fires it; the app just
-# serves the redirect.
-METHODS = {"hub", "websub", "apiredirect"}
+# joined by '+', or 'control' for none. The app applies hub + websub +
+# sitemapredirect. 'apiredirect' = seed.py pings the Indexing API at THIS app's
+# /r/<id> redirector (which we own), 301-ing to the target.
+# 'sitemapredirect' = the same /r/<id> redirector is listed in a polled
+# sitemap (/sitemap-redirects.xml) with an honest set-once lastmod, so Google
+# discovers it passively via sitemap re-reads (gated by domain crawl budget).
+METHODS = {"hub", "websub", "apiredirect", "sitemapredirect"}
 
 
 def bucket_methods(bucket):
@@ -152,16 +153,16 @@ def new_target():
     slug = re.sub(r"[^a-z0-9-]", "", (data.get("slug") or "").strip().lower())
     if not slug:
         abort(400, "slug required (a-z0-9- only)")
-    bucket = (data.get("bucket") or "both").strip().lower()
-    if bucket not in BUCKETS:
-        abort(400, f"bucket must be one of {sorted(BUCKETS)}")
+    bucket = (data.get("bucket") or "control").strip().lower()
+    if not valid_bucket(bucket):
+        abort(400, f"bucket methods must be subset of {sorted(METHODS)} or 'control'")
     url = f"{BASE_URL}/t/{slug}"
 
     with db() as conn:
         if conn.execute("SELECT 1 FROM urls WHERE slug = ? OR url = ?",
                         (slug, url)).fetchone():
             abort(409, "slug/url already exists")
-        hub_id = next_hub_id(conn) if bucket in ("hub", "both") else None
+        hub_id = next_hub_id(conn) if "hub" in bucket_methods(bucket) else None
         conn.execute(
             "INSERT INTO urls (url, slug, title, summary, body, bucket, hub_id, "
             "submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -205,6 +206,15 @@ SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <url><loc>{{ base }}/</loc></url>
 {% for h in hubs %}<url><loc>{{ base }}/hub/{{ h }}</loc></url>
+{% endfor %}</urlset>"""
+
+# Redirect sitemap: lists /r/<id> for sitemapredirect-method URLs. Each <loc>
+# is a redirect we own; lastmod = the row's creation time, set ONCE and never
+# re-dated (honest — a redirect never changes). The sitemap file's own change
+# (a new <url> appended) is what Google notices on re-read.
+SITEMAP_REDIRECTS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+{% for r in rows %}<url><loc>{{ base }}/r/{{ r['id'] }}</loc><lastmod>{{ r['submitted_at'] }}</lastmod></url>
 {% endfor %}</urlset>"""
 
 FEED_XML = """<?xml version="1.0" encoding="utf-8"?>
@@ -282,6 +292,19 @@ def redirector(row_id):
 def sitemap():
     with db() as conn:
         xml = render_template_string(SITEMAP_XML, base=BASE_URL, hubs=hub_ids(conn))
+    return Response(xml, mimetype="application/xml")
+
+
+@app.get("/sitemap-redirects.xml")
+def sitemap_redirects():
+    """Polled sitemap of /r/<id> redirects for the sitemapredirect method."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, submitted_at FROM urls "
+            "WHERE bucket = 'sitemapredirect' OR bucket LIKE '%sitemapredirect%' "
+            "ORDER BY id"
+        ).fetchall()
+    xml = render_template_string(SITEMAP_REDIRECTS_XML, base=BASE_URL, rows=rows)
     return Response(xml, mimetype="application/xml")
 
 
