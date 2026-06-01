@@ -1,7 +1,7 @@
 # Caddy routes each domain to its app and gets free auto-HTTPS.
 # Replace the email with yours (used by Let's Encrypt for cert notices).
 {
-	email you@example.com
+	email lewis.housten23x@gmail.com
 }
 
 # Hub app (hub pages, sitemap, feed, WebSub)
