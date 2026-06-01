@@ -1,51 +1,64 @@
-"""Drive the two-domain experiment end to end.
+"""Drive the indexing experiment end to end.
 
-For each test page it:
+Tests every combination of three methods (hub, websub, api) plus a control,
+with N samples each, so you can see which method — alone or combined — actually
+gets pages indexed.
+
+For each page it:
   1. creates the page on the TARGET app (coffeeclubguide.site)
-  2. registers that URL with the HUB app (ozymandias.space) under a bucket
-  3. fires the WebSub ping when the bucket is in the feed
+  2. registers it with the HUB app under its bucket (applies hub + websub)
+  3. (api method) pings the Google Indexing API for that URL
+  4. fires ONE WebSub ping at the end if any fed bucket exists
 
-Buckets isolate the mechanisms so you learn WHICH one indexed a page:
-  control = page exists, linked/fed nowhere   (baseline — should NOT index)
-  hub     = hub link only
-  websub  = feed/ping only
-  both    = hub link + feed/ping
+Buckets (canonical: methods sorted, '+'-joined, or 'control'):
+  control, hub, websub, api,
+  hub+websub, api+hub, api+websub, api+hub+websub
+
+api method requires SA_KEY (service-account JSON, owner of the target
+property). Omit --with-api to skip API buckets if you haven't set that up yet.
 
 Usage:
-    uv run seed.py --hub https://ozymandias.space --target https://coffeeclubguide.site
-    (defaults to localhost:5000 / :5001 for a local dry run)
+    SA_KEY=/path/to/sa.json uv run seed.py \\
+        --hub https://ozymandias.space --target https://coffeeclubguide.site
 """
 import argparse
+import itertools
 import sys
 import requests
 
 API_KEY = "poc-secret-key-change-me"
 WEBSUB_HUB = "https://pubsubhubbub.appspot.com/"
+SAMPLES = 3   # urls per bucket
 
-# The test set. Same content style across buckets so the only variable is the
-# mechanism, not the page. Add/dup these to grow sample size per bucket.
-PAGES = [
-    {"slug": "pour-over-basics", "bucket": "control",
-     "title": "Pour Over Basics",
-     "summary": "A short guide to pour over coffee.",
-     "body": "Pour over brewing rewards a steady hand and a slow pour. "
-             "Start with a rinse, bloom for thirty seconds, then pour in stages."},
-    {"slug": "grind-size-guide", "bucket": "hub",
-     "title": "Grind Size Guide",
-     "summary": "Matching grind size to brew method.",
-     "body": "Grind size is the lever most people ignore. Coarse for press, "
-             "medium for drip, fine for espresso. Adjust to taste and time."},
-    {"slug": "water-temperature", "bucket": "websub",
-     "title": "Water Temperature",
-     "summary": "Why brew temperature matters.",
-     "body": "Off-boil water around ninety-three degrees extracts cleanly. "
-             "Too hot scorches; too cool leaves the cup thin and sour."},
-    {"slug": "bean-storage", "bucket": "both",
-     "title": "Bean Storage",
-     "summary": "Keeping beans fresh longer.",
-     "body": "Air, light, heat, and moisture are the enemies of fresh beans. "
-             "An opaque airtight container at room temperature wins."},
+# coffee-themed content fragments; varied per page so pages aren't identical
+TOPICS = [
+    ("Pour Over Basics", "A short guide to pour over coffee.",
+     "Pour over brewing rewards a steady hand and a slow pour."),
+    ("Grind Size Guide", "Matching grind size to brew method.",
+     "Grind size is the lever most people ignore when dialling in a cup."),
+    ("Water Temperature", "Why brew temperature matters.",
+     "Off-boil water around ninety-three degrees extracts cleanly."),
+    ("Bean Storage", "Keeping beans fresh longer.",
+     "Air, light, heat, and moisture are the enemies of fresh beans."),
+    ("Espresso Ratios", "Dialling in a balanced shot.",
+     "A classic ratio is one part coffee to two parts liquid espresso."),
+    ("Cold Brew Method", "Smooth low-acid coffee at home.",
+     "Steep coarse grounds in cold water for sixteen hours, then strain."),
+    ("Milk Texturing", "Microfoam for flat whites and lattes.",
+     "Stretch the milk briefly, then submerge the tip to spin a tight whirlpool."),
+    ("Filter Choice", "Paper, metal, and cloth filters compared.",
+     "Paper traps oils for a clean cup; metal lets body and sediment through."),
 ]
+
+
+def buckets():
+    """All 8 method combinations as canonical bucket names."""
+    out = ["control"]
+    methods = ["api", "hub", "websub"]  # sorted order for canonical names
+    for r in (1, 2, 3):
+        for combo in itertools.combinations(methods, r):
+            out.append("+".join(combo))
+    return out
 
 
 def post(url, **kw):
@@ -58,47 +71,65 @@ def post(url, **kw):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--hub", default="http://localhost:5000",
-                   help="hub app base URL (ozymandias.space)")
-    p.add_argument("--target", default="http://localhost:5001",
-                   help="target app base URL (coffeeclubguide.site)")
+    p.add_argument("--hub", default="http://localhost:5000")
+    p.add_argument("--target", default="http://localhost:5001")
+    p.add_argument("--with-api", action="store_true",
+                   help="fire the Indexing API for 'api' buckets (needs SA_KEY)")
+    p.add_argument("--samples", type=int, default=SAMPLES)
     args = p.parse_args()
     hub, target = args.hub.rstrip("/"), args.target.rstrip("/")
     feed = f"{hub}/feed.xml"
 
+    idx_service = None
+    if args.with_api:
+        from google_index import get_service
+        idx_service = get_service()
+
+    topic_cycle = itertools.cycle(TOPICS)
     pinged = False
-    for pg in PAGES:
-        print(f"[{pg['bucket']:7}] {pg['slug']}")
+    api_count = 0
 
-        # 1. create the page on the target domain
-        created = post(f"{target}/api/pages", json={
-            "slug": pg["slug"], "title": pg["title"],
-            "summary": pg["summary"], "body": pg["body"]})
-        if not created:
+    for bucket in buckets():
+        methods = set() if bucket == "control" else set(bucket.split("+"))
+        if "api" in methods and not args.with_api:
+            print(f"[{bucket}] skipped (no --with-api)")
             continue
-        page_url = created["url"]
-        print(f"  created: {page_url}")
 
-        # 2. register with the hub under its bucket (control still recorded,
-        #    just never linked/fed — gives the checker something to poll)
-        reg = post(f"{hub}/submit", json={
-            "url": page_url, "bucket": pg["bucket"],
-            "title": pg["title"], "summary": pg["summary"]})
-        if reg:
-            print(f"  registered: bucket={reg['bucket']} hub_id={reg['hub_id']}")
+        for i in range(args.samples):
+            title, summary, body = next(topic_cycle)
+            slug = f"{bucket.replace('+', '-')}-{i+1}"
+            print(f"[{bucket}] {slug}")
 
-        # 3. WebSub ping once per run if any fed bucket is present
-        if pg["bucket"] in ("websub", "both"):
-            pinged = True
+            created = post(f"{target}/api/pages", json={
+                "slug": slug, "title": f"{title} {i+1}",
+                "summary": summary, "body": body})
+            if not created:
+                continue
+            page_url = created["url"]
+
+            reg = post(f"{hub}/submit", json={
+                "url": page_url, "bucket": bucket,
+                "title": f"{title} {i+1}", "summary": summary})
+            if not reg:
+                continue
+
+            if "websub" in methods:
+                pinged = True
+            if "api" in methods:
+                from google_index import publish
+                try:
+                    publish(idx_service, page_url)
+                    api_count += 1
+                except Exception as e:
+                    print(f"  ! indexing api: {e}", file=sys.stderr)
 
     if pinged:
         w = requests.post(WEBSUB_HUB,
                           data={"hub.mode": "publish", "hub.url": feed}, timeout=15)
         print(f"\nwebsub ping ({feed}): {w.status_code}")
-    else:
-        print("\nwebsub ping: skipped (no fed buckets)")
-
-    print("\nseeded. now run checker.py periodically to watch index state.")
+    if idx_service:
+        print(f"indexing api: {api_count} urls pinged")
+    print("\nseeded. run checker.py periodically to watch index state.")
 
 
 if __name__ == "__main__":

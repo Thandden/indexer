@@ -27,8 +27,21 @@ WEBSUB_HUB = "https://pubsubhubbub.appspot.com/"
 # absolute URLs in sitemap/feed. Override via env in production.
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:5000").rstrip("/")
 
-# valid experiment buckets — decide which mechanisms a URL is exposed to
-BUCKETS = {"control", "websub", "hub", "both"}
+# A bucket is a combination of methods, canonical form: methods sorted and
+# joined by '+', or 'control' for none. Methods this app can apply: hub, websub.
+# 'api' (Indexing API) is fired externally by seed.py, not here, but may appear
+# in a bucket name — the app just ignores it for linking/feed decisions.
+METHODS = {"hub", "websub", "api"}
+
+
+def bucket_methods(bucket):
+    if bucket == "control":
+        return set()
+    return set(bucket.split("+"))
+
+
+def valid_bucket(bucket):
+    return bucket == "control" or bucket_methods(bucket) <= METHODS
 
 app = Flask(__name__)
 
@@ -88,26 +101,29 @@ def require_key():
 def submit():
     """Register a target URL. Body: {url, title?, summary?, bucket?}.
 
-    bucket controls exposure so the same app runs the A-D experiment:
-      control = recorded only, never linked or pinged (baseline)
-      websub  = appears in feed only (WebSub nudge, no durable link)
-      hub     = linked from a hub page only (durable, no ping)
-      both    = linked AND in feed (the real T+0 combo)
+    bucket is a '+'-joined combo of methods (or 'control'). This app applies
+    the 'hub' and 'websub' methods; 'api' is fired by seed.py but recorded here
+    so the checker tracks it. Examples:
+      control            -> recorded only, never linked/fed (baseline)
+      hub                -> hub link only
+      websub             -> feed only
+      hub+websub+api     -> linked, fed, and API-pinged
     """
     require_key()
     data = request.get_json(force=True, silent=True) or {}
     url = (data.get("url") or "").strip()
     if not url.startswith(("http://", "https://")):
         abort(400, "url must be absolute http(s)")
-    bucket = (data.get("bucket") or "both").strip().lower()
-    if bucket not in BUCKETS:
-        abort(400, f"bucket must be one of {sorted(BUCKETS)}")
+    bucket = (data.get("bucket") or "control").strip().lower()
+    if not valid_bucket(bucket):
+        abort(400, f"bucket methods must be subset of {sorted(METHODS)} or 'control'")
+    methods = bucket_methods(bucket)
 
     with db() as conn:
         if conn.execute("SELECT 1 FROM urls WHERE url = ?", (url,)).fetchone():
             abort(409, "url already submitted")
-        # only bucket gets a durable hub link
-        hub_id = next_hub_id(conn) if bucket in ("hub", "both") else None
+        # only 'hub' method gets a durable hub link
+        hub_id = next_hub_id(conn) if "hub" in methods else None
         conn.execute(
             "INSERT INTO urls (url, title, summary, bucket, hub_id, submitted_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -254,10 +270,10 @@ def sitemap():
 
 @app.get("/feed.xml")
 def feed():
-    # feed carries 'websub' and 'both' buckets (the URLs meant to get a ping)
+    # feed carries any bucket whose methods include 'websub'
     with db() as conn:
         rows = conn.execute(
-            "SELECT * FROM urls WHERE bucket IN ('websub', 'both') "
+            "SELECT * FROM urls WHERE bucket = 'websub' OR bucket LIKE '%websub%' "
             "ORDER BY id DESC LIMIT ?", (FEED_ITEMS,)
         ).fetchall()
     xml = render_template_string(
