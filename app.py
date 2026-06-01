@@ -4,9 +4,15 @@ Renders crawlable hub pages + sitemap + Atom/WebSub feed from a list of
 submitted target URLs. A helper script POSTs URLs to /submit; Googlebot
 crawls the hub pages and (hopefully) discovers the target URLs.
 
+Two ways to supply targets:
+  - /submit       : register an EXTERNAL url (target lives on another domain)
+  - /new-target   : MINT a target page on THIS domain (served at /t/<slug>),
+                    so a single-domain test needs no second site.
+
 Single domain, single rolling hub, SQLite, hard-coded API key. POC only.
 """
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, abort, Response, render_template_string
@@ -41,8 +47,10 @@ def init_db():
             CREATE TABLE IF NOT EXISTS urls (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 url          TEXT NOT NULL UNIQUE,
+                slug         TEXT UNIQUE,         -- set when target is hosted on THIS domain (/t/<slug>)
                 title        TEXT,
                 summary      TEXT,
+                body         TEXT,               -- page content for locally-hosted targets
                 bucket       TEXT NOT NULL DEFAULT 'both',
                 hub_id       INTEGER,            -- NULL for control/websub-only (not linked)
                 submitted_at TEXT NOT NULL,
@@ -106,6 +114,40 @@ def submit():
             (url, data.get("title"), data.get("summary"), bucket, hub_id, utcnow()),
         )
     return jsonify({"ok": True, "url": url, "bucket": bucket, "hub_id": hub_id}), 201
+
+
+@app.post("/new-target")
+def new_target():
+    """Mint a target page hosted on THIS domain, served at /t/<slug>.
+
+    Body: {slug, title?, summary?, body?, bucket?}. Lets a single-domain test
+    run without a second site: the app both hosts the target AND links/feeds it.
+    The stored url is BASE_URL/t/<slug>, so it flows through hubs/feed/checker
+    exactly like an external url.
+    """
+    require_key()
+    data = request.get_json(force=True, silent=True) or {}
+    slug = re.sub(r"[^a-z0-9-]", "", (data.get("slug") or "").strip().lower())
+    if not slug:
+        abort(400, "slug required (a-z0-9- only)")
+    bucket = (data.get("bucket") or "both").strip().lower()
+    if bucket not in BUCKETS:
+        abort(400, f"bucket must be one of {sorted(BUCKETS)}")
+    url = f"{BASE_URL}/t/{slug}"
+
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM urls WHERE slug = ? OR url = ?",
+                        (slug, url)).fetchone():
+            abort(409, "slug/url already exists")
+        hub_id = next_hub_id(conn) if bucket in ("hub", "both") else None
+        conn.execute(
+            "INSERT INTO urls (url, slug, title, summary, body, bucket, hub_id, "
+            "submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (url, slug, data.get("title"), data.get("summary"),
+             data.get("body"), bucket, hub_id, utcnow()),
+        )
+    return jsonify({"ok": True, "url": url, "slug": slug,
+                    "bucket": bucket, "hub_id": hub_id}), 201
 
 
 @app.get("/urls")
@@ -181,6 +223,26 @@ def hub(hub_id):
     if not rows:
         abort(404)
     return render_template_string(HUB_HTML, hub_id=hub_id, rows=rows)
+
+
+TARGET_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<title>{{ r['title'] or r['slug'] }}</title>
+<meta name="description" content="{{ r['summary'] or '' }}"></head><body>
+<article>
+<h1>{{ r['title'] or r['slug'] }}</h1>
+<p>{{ r['body'] or r['summary'] or 'A page worth indexing.' }}</p>
+</article>
+</body></html>"""
+
+
+@app.get("/t/<slug>")
+def target(slug):
+    """Serve a target page hosted on this domain (minted via /new-target)."""
+    with db() as conn:
+        r = conn.execute("SELECT * FROM urls WHERE slug = ?", (slug,)).fetchone()
+    if not r:
+        abort(404)
+    return render_template_string(TARGET_HTML, r=r)
 
 
 @app.get("/sitemap.xml")
