@@ -1,0 +1,15 @@
+# Caddy routes each domain to its app and gets free auto-HTTPS.
+# Replace the email with yours (used by Let's Encrypt for cert notices).
+{
+	email you@example.com
+}
+
+# Hub app (hub pages, sitemap, feed, WebSub)
+ozymandias.space, www.ozymandias.space {
+	reverse_proxy localhost:5000
+}
+
+# Target app (hosts the pages we're trying to get indexed)
+coffeeclubguide.site, www.coffeeclubguide.site {
+	reverse_proxy localhost:5001
+}
