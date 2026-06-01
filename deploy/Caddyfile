@@ -7,9 +7,24 @@
 # Hub app (hub pages, sitemap, feed, WebSub)
 ozymandias.space, www.ozymandias.space {
 	reverse_proxy localhost:5000
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
+		format json
+	}
 }
 
 # Target app (hosts the pages we're trying to get indexed)
+# This is the one we care about for Googlebot crawl confirmation.
 coffeeclubguide.site, www.coffeeclubguide.site {
 	reverse_proxy localhost:5001
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
+		format json
+	}
 }
