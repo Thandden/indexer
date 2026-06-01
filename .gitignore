@@ -36,3 +36,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+sa.json
+service-account*.json

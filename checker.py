@@ -36,7 +36,8 @@ SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 # Domain property -> "sc-domain:example.com"; URL-prefix -> "https://example.com/".
 # Add an entry per domain you're testing.
 SITE_URLS = {
-    # "example.com": "sc-domain:example.com",
+    "coffeeclubguide.site": "sc-domain:coffeeclubguide.site",
+    "ozymandias.space": "sc-domain:ozymandias.space",
 }
 
 

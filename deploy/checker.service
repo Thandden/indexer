@@ -1,0 +1,10 @@
+[Unit]
+Description=Indexer indexation checker (one shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/indexer
+Environment=SA_KEY=/home/ubuntu/indexer/sa.json
+ExecStart=/home/ubuntu/.local/bin/uv run python checker.py
