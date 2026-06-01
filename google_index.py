@@ -2,8 +2,10 @@
 
 Pings Google to crawl a URL via the Indexing API. Officially only for
 JobPosting/BroadcastEvent, used here for any page (POC). Requires the service
-account to be an OWNER of the URL's Search Console property — which we are,
-since we own coffeeclubguide.site.
+account to be an OWNER of the pinged URL's Search Console property.
+
+We ping the HUB redirector (ozymandias.space/r/<id>), so the service account
+must be OWNER of ozymandias.space. The 301 carries the crawl to the target.
 
 Same service-account JSON key as checker.py. Set SA_KEY to its path.
 """

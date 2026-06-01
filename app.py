@@ -15,7 +15,8 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify, abort, Response, render_template_string
+from flask import (Flask, request, jsonify, abort, Response, redirect,
+                   render_template_string)
 
 # --- config (hard-coded for POC ease; do NOT ship this) ---------------------
 API_KEY = "poc-secret-key-change-me"
@@ -28,10 +29,12 @@ WEBSUB_HUB = "https://pubsubhubbub.appspot.com/"
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:5000").rstrip("/")
 
 # A bucket is a combination of methods, canonical form: methods sorted and
-# joined by '+', or 'control' for none. Methods this app can apply: hub, websub.
-# 'api' (Indexing API) is fired externally by seed.py, not here, but may appear
-# in a bucket name — the app just ignores it for linking/feed decisions.
-METHODS = {"hub", "websub", "api"}
+# joined by '+', or 'control' for none. The app applies hub + websub.
+# 'apiredirect' = seed.py pings the Indexing API at THIS app's /r/<id>
+# redirector (which we own), 301-ing to the target — the production-faithful
+# way to use the API without owning the target. seed.py fires it; the app just
+# serves the redirect.
+METHODS = {"hub", "websub", "apiredirect"}
 
 
 def bucket_methods(bucket):
@@ -124,12 +127,15 @@ def submit():
             abort(409, "url already submitted")
         # only 'hub' method gets a durable hub link
         hub_id = next_hub_id(conn) if "hub" in methods else None
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO urls (url, title, summary, bucket, hub_id, submitted_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (url, data.get("title"), data.get("summary"), bucket, hub_id, utcnow()),
         )
-    return jsonify({"ok": True, "url": url, "bucket": bucket, "hub_id": hub_id}), 201
+        row_id = cur.lastrowid
+    redirect_url = f"{BASE_URL}/r/{row_id}"
+    return jsonify({"ok": True, "id": row_id, "url": url, "bucket": bucket,
+                    "hub_id": hub_id, "redirect_url": redirect_url}), 201
 
 
 @app.post("/new-target")
@@ -259,6 +265,17 @@ def target(slug):
     if not r:
         abort(404)
     return render_template_string(TARGET_HTML, r=r)
+
+
+@app.get("/r/<int:row_id>")
+def redirector(row_id):
+    """301 to the target URL. We own this domain, so the Indexing API may be
+    pinged here; the redirect carries the crawl to a target we don't own."""
+    with db() as conn:
+        r = conn.execute("SELECT url FROM urls WHERE id = ?", (row_id,)).fetchone()
+    if not r:
+        abort(404)
+    return redirect(r["url"], code=301)
 
 
 @app.get("/sitemap.xml")

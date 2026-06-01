@@ -1,24 +1,26 @@
 """Drive the indexing experiment end to end.
 
-Tests every combination of three methods (hub, websub, api) plus a control,
-with N samples each, so you can see which method — alone or combined — actually
-gets pages indexed.
+Tests every combination of three methods (hub, websub, apiredirect) plus a
+control, with N samples each, so you can see which method — alone or combined —
+actually gets pages indexed.
 
 For each page it:
   1. creates the page on the TARGET app (coffeeclubguide.site)
   2. registers it with the HUB app under its bucket (applies hub + websub)
-  3. (api method) pings the Google Indexing API for that URL
+  3. (apiredirect method) pings the Google Indexing API at the hub's /r/<id>
+     redirector, which 301s to the target — production-faithful API use that
+     needs ownership of the HUB only, not the target.
   4. fires ONE WebSub ping at the end if any fed bucket exists
 
 Buckets (canonical: methods sorted, '+'-joined, or 'control'):
-  control, hub, websub, api,
-  hub+websub, api+hub, api+websub, api+hub+websub
+  control, apiredirect, hub, websub,
+  apiredirect+hub, apiredirect+websub, hub+websub, apiredirect+hub+websub
 
-api method requires SA_KEY (service-account JSON, owner of the target
-property). Omit --with-api to skip API buckets if you haven't set that up yet.
+apiredirect requires SA_KEY (service-account JSON, OWNER of the HUB property
+ozymandias.space). Omit --with-api to skip those buckets.
 
 Usage:
-    SA_KEY=/path/to/sa.json uv run seed.py \\
+    SA_KEY=/path/to/sa.json uv run seed.py --with-api \\
         --hub https://ozymandias.space --target https://coffeeclubguide.site
 """
 import argparse
@@ -54,7 +56,7 @@ TOPICS = [
 def buckets():
     """All 8 method combinations as canonical bucket names."""
     out = ["control"]
-    methods = ["api", "hub", "websub"]  # sorted order for canonical names
+    methods = ["apiredirect", "hub", "websub"]  # sorted order for canonical names
     for r in (1, 2, 3):
         for combo in itertools.combinations(methods, r):
             out.append("+".join(combo))
@@ -91,7 +93,7 @@ def main():
 
     for bucket in buckets():
         methods = set() if bucket == "control" else set(bucket.split("+"))
-        if "api" in methods and not args.with_api:
+        if "apiredirect" in methods and not args.with_api:
             print(f"[{bucket}] skipped (no --with-api)")
             continue
 
@@ -115,10 +117,12 @@ def main():
 
             if "websub" in methods:
                 pinged = True
-            if "api" in methods:
+            if "apiredirect" in methods:
+                # ping the API at the hub's redirector (we own the hub); the
+                # 301 carries the crawl to the target we don't own
                 from google_index import publish
                 try:
-                    publish(idx_service, page_url)
+                    publish(idx_service, reg["redirect_url"])
                     api_count += 1
                 except Exception as e:
                     print(f"  ! indexing api: {e}", file=sys.stderr)
