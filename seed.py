@@ -78,9 +78,13 @@ def main():
     p.add_argument("--with-api", action="store_true",
                    help="fire the Indexing API for 'api' buckets (needs SA_KEY)")
     p.add_argument("--samples", type=int, default=SAMPLES)
+    p.add_argument("--cohort", default="",
+                   help="slug prefix to tag a fresh batch, e.g. c2 (avoids "
+                        "collision with earlier runs)")
     args = p.parse_args()
     hub, target = args.hub.rstrip("/"), args.target.rstrip("/")
     feed = f"{hub}/feed.xml"
+    prefix = f"{args.cohort}-" if args.cohort else ""
 
     idx_service = None
     if args.with_api:
@@ -99,7 +103,7 @@ def main():
 
         for i in range(args.samples):
             title, summary, body = next(topic_cycle)
-            slug = f"{bucket.replace('+', '-')}-{i+1}"
+            slug = f"{prefix}{bucket.replace('+', '-')}-{i+1}"
             print(f"[{bucket}] {slug}")
 
             created = post(f"{target}/api/pages", json={
